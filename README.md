@@ -71,10 +71,9 @@ Add to your MCP settings:
 ```json
 {
   "mcpServers": {
-    "sdr-proxy": {
-      "url": "http://localhost:8001/sse",
+   "sdr-proxy": {
+      "serverUrl": "http://127.0.0.1:8001/sse",
       "transport": "sse"
-    }
   }
 }
 ```
