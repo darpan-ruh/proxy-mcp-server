@@ -1,17 +1,17 @@
 import json
 import httpx
+import contextlib
+import uvicorn
+import logging
 from mcp.server import Server
-from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import Route
-from starlette.requests import Request
 from starlette.responses import JSONResponse
 import mcp.types as types
 from src.config import BACKEND_URL, SERVER_AUTH_KEY, HOST, PORT
-import uvicorn
-import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,8 +19,6 @@ logger = logging.getLogger(__name__)
 # Initialize MCP Server
 mcp_server = Server("proxy-mcp-server")
 
-# SSE Transport - must be initialized before routes
-sse = SseServerTransport("/messages")
 
 @mcp_server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
@@ -42,6 +40,7 @@ async def handle_list_tools() -> list[types.Tool]:
         )
     ]
 
+
 @mcp_server.call_tool()
 async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
     """Handle tool execution"""
@@ -60,14 +59,12 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                     timeout=60.0
                 )
                 
-                # Get full response with status code
                 status_code = response.status_code
                 try:
                     result = response.json()
                 except:
                     result = {"raw_text": response.text}
                 
-                # Build complete response
                 full_response = {
                     "status_code": status_code,
                     "success": status_code == 200,
@@ -89,55 +86,86 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
     raise ValueError(f"Unknown tool: {name}")
 
 
-async def handle_sse(request: Request):
-    """Handle SSE connection"""
-    logger.info("SSE connection requested")
-    async with sse.connect_sse(
-        request.scope, 
-        request.receive, 
-        request._send
-    ) as streams:
-        logger.info("SSE connection established, running MCP server")
-        await mcp_server.run(
-            streams[0], 
-            streams[1], 
-            mcp_server.create_initialization_options()
-        )
-
-
-async def handle_messages(request: Request):
-    """Handle POST messages"""
-    logger.info("Message received")
-    await sse.handle_post_message(request.scope, request.receive, request._send)
-
-
-async def health_check(request: Request):
+async def health_check(request):
     """Health check endpoint"""
     return JSONResponse({"status": "ok", "server": "proxy-mcp-server"})
 
 
-# Routes
-routes = [
-    Route("/", endpoint=health_check, methods=["GET"]),
-    Route("/sse", endpoint=handle_sse, methods=["GET"]),
-    Route("/messages", endpoint=handle_messages, methods=["POST"]),
-]
-
-# Middleware
-middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["*"],
+async def create_app():
+    """Create the Starlette application with StreamableHTTP transport"""
+    
+    # Create the session manager for StreamableHTTP
+    session_manager = StreamableHTTPSessionManager(
+        app=mcp_server,
+        json_response=False,
+        stateless=False,
     )
-]
+    
+    # Handler for StreamableHTTP connections
+    class HandleStreamableHttp:
+        def __init__(self, session_manager):
+            self.session_manager = session_manager
+        
+        async def __call__(self, scope, receive, send):
+            try:
+                logger.info("Handling Streamable HTTP connection...")
+                await self.session_manager.handle_request(scope, receive, send)
+                logger.info("Streamable HTTP connection closed.")
+            except Exception as e:
+                logger.error(f"Error handling Streamable HTTP request: {e}")
+                await send({
+                    "type": "http.response.start",
+                    "status": 500,
+                    "headers": [(b"content-type", b"application/json")],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": json.dumps({"error": f"Internal server error: {str(e)}"}).encode("utf-8"),
+                })
+    
+    # Routes
+    routes = [
+        Route("/", endpoint=health_check, methods=["GET"]),
+        Route("/mcp", endpoint=HandleStreamableHttp(session_manager), methods=["POST"]),
+    ]
+    
+    # Middleware
+    middleware = [
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["*"],
+        )
+    ]
+    
+    # Lifespan for session manager
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        async with session_manager.run():
+            logger.info("Application started with StreamableHTTP session manager!")
+            try:
+                yield
+            finally:
+                logger.info("Application shutting down...")
+    
+    return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
 
-# Create Starlette app
-app = Starlette(routes=routes, middleware=middleware)
 
+async def start_server():
+    """Start the server asynchronously"""
+    app = await create_app()
+    logger.info(f"Starting Proxy MCP Server on {HOST}:{PORT}")
+    
+    config = uvicorn.Config(app, host=HOST, port=PORT)
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
+# For uvicorn to import
+app = None
 
 if __name__ == "__main__":
-    logger.info(f"Starting Proxy MCP Server on {HOST}:{PORT}")
-    uvicorn.run(app, host=HOST, port=PORT)
+    import asyncio
+    asyncio.run(start_server())

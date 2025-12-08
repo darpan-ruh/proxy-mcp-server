@@ -34,13 +34,32 @@ PORT=8001
 
 ### 3. Run the Server
 ```bash
-uv run uvicorn src.server:app --host 0.0.0.0 --port 8001
+uv run python -m src.server
+```
+
+### 4. Expose via Cloudflare Tunnel (for remote access)
+```bash
+cloudflared tunnel --url http://localhost:8001
 ```
 
 ## Usage with AI Agents
 
-### Claude Desktop
-Add to your `claude_desktop_config.json`:
+### Antigravity / Cursor / VS Code
+Add to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "sdr-proxy": {
+      "url": "https://your-tunnel-url.trycloudflare.com/mcp",
+      "transport": "streamable-http"
+    }
+  }
+}
+```
+
+### Claude Desktop (Local)
+Add to `claude_desktop_config.json`:
 
 ```json
 {
@@ -51,10 +70,9 @@ Add to your `claude_desktop_config.json`:
         "--directory",
         "/path/to/proxy-mcp-server",
         "run",
-        "uvicorn",
-        "src.server:app",
-        "--host", "127.0.0.1",
-        "--port", "8001"
+        "python",
+        "-m",
+        "src.server"
       ],
       "env": {
         "SERVER_AUTH_KEY": "your-backend-auth-key",
@@ -65,23 +83,10 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
-### Cursor / VS Code with MCP Extension
-Add to your MCP settings:
-
-```json
-{
-  "mcpServers": {
-   "sdr-proxy": {
-      "serverUrl": "http://127.0.0.1:8001/sse",
-      "transport": "sse"
-  }
-}
-```
-
 ## Testing with MCP Inspector
 
 ```bash
-npx @modelcontextprotocol/inspector http://localhost:8001/sse
+npx @modelcontextprotocol/inspector http://localhost:8001/mcp
 ```
 
 This opens a browser UI where you can test the tools.
@@ -91,11 +96,25 @@ This opens a browser UI where you can test the tools.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Health check |
-| `/sse` | GET | SSE connection for MCP |
-| `/messages` | POST | MCP message handler |
+| `/mcp` | POST | StreamableHTTP endpoint for MCP |
+
+## Architecture
+
+```
+AI Agent 
+        ↓
+        ↓ (StreamableHTTP)
+        ↓
+[Proxy MCP Server] ──→ localhost:8000 (SDR Backend)
+        ↑
+        ↑ (Cloudflare Tunnel for remote access)
+        ↑
+Remote AI Agents
+```
 
 ## Requirements
 
 - Python 3.10+
 - uv (Python package manager)
 - Running SDR Backend on port 8000
+- cloudflared (for remote access)
